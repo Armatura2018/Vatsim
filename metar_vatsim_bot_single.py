@@ -182,22 +182,75 @@ def extract_report(text, icao, kind):
             return norm(m.group(0))[:1600]
     return None
 
+
 def fetch_reports(icao):
-    url = METAR_BASE + "/" + urllib.parse.quote(icao)
+    """
+    Получение METAR и TAF через Aviation Weather API.
+    Данные доступны без API-ключа.
+    """
+
+    import urllib.parse
+
+    icao = icao.upper().strip()
+
+    if not re.fullmatch(r"[A-Z0-9]{4}", icao):
+        raise RuntimeError("Некорректный ICAO")
+
+    base = "https://aviationweather.gov/api/data"
+
+    headers = {
+        "User-Agent": "METAR-VATSIM-Telegram-Bot/1.0",
+        "Accept": "text/plain"
+    }
+
+    # Получаем METAR
+    metar_url = (
+        f"{base}/metar?"
+        + urllib.parse.urlencode({
+            "ids": icao,
+            "format": "raw",
+            "hours": "2"
+        })
+    )
+
     try:
-        page = get_url(url, headers={"Accept": "text/html"}).decode("utf-8", "replace")
+        metar = get_url(
+            metar_url,
+            timeout=25,
+            headers=headers
+        ).decode("utf-8", "replace").strip()
+
+        if not metar:
+            raise RuntimeError("METAR для аэропорта не найден")
+
     except Exception as e:
-        raise RuntimeError(f"Не удалось загрузить metar-taf.com: {e}")
-    parser = TextExtractor()
-    parser.feed(page)
-    visible = norm(" ".join(parser.parts))
-    meta = " ".join(re.findall(r'<meta[^>]+content=["\']([^"\']+)', page, re.I))
-    text = norm(visible + " " + html.unescape(meta))
-    metar = extract_report(text, icao, "METAR")
-    taf = extract_report(text, icao, "TAF")
-    if not metar:
-        raise RuntimeError("METAR не извлечён из HTML. Возможно, сайт изменил страницу или ограничил запрос. Откройте " + url)
-    return {"metar": metar, "taf": taf, "url": url}
+        raise RuntimeError(f"Ошибка получения METAR: {e}")
+
+    # Получаем TAF
+    taf_url = (
+        f"{base}/taf?"
+        + urllib.parse.urlencode({
+            "ids": icao,
+            "format": "raw",
+            "hours": "24"
+        })
+    )
+
+    try:
+        taf = get_url(
+            taf_url,
+            timeout=25,
+            headers=headers
+        ).decode("utf-8", "replace").strip()
+
+    except Exception:
+        taf = None
+
+    return {
+        "metar": metar,
+        "taf": taf or None,
+        "url": f"https://metar-taf.com/{icao}"
+    }
 
 
 # ---------------- METAR / TAF decoder ----------------
