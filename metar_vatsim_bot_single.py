@@ -183,74 +183,138 @@ def extract_report(text, icao, kind):
     return None
 
 
-def fetch_reports(icao):
-    """
-    Получение METAR и TAF через Aviation Weather API.
-    Данные доступны без API-ключа.
-    """
 
+def fetch_reports(icao):
     import urllib.parse
+    from datetime import datetime, timezone, timedelta
+    import re
 
     icao = icao.upper().strip()
 
     if not re.fullmatch(r"[A-Z0-9]{4}", icao):
-        raise RuntimeError("Некорректный ICAO")
+        raise RuntimeError("Некорректный ICAO-код")
 
     base = "https://aviationweather.gov/api/data"
 
     headers = {
-        "User-Agent": "METAR-VATSIM-Telegram-Bot/1.0",
+        "User-Agent": "METAR-VATSIM-Telegram-Bot/1.0 contact bot",
         "Accept": "text/plain"
     }
 
-    # Получаем METAR
-    metar_url = (
-        f"{base}/metar?"
-        + urllib.parse.urlencode({
+    now = datetime.now(timezone.utc)
+
+    def request(endpoint, hours):
+        url = base + "/" + endpoint + "?" + urllib.parse.urlencode({
             "ids": icao,
             "format": "raw",
-            "hours": "2"
+            "hours": str(hours)
         })
-    )
+
+        try:
+            data = get_url(url, timeout=30, headers=headers)
+            return data.decode("utf-8", "replace").strip()
+        except Exception as e:
+            raise RuntimeError(f"Ошибка API {endpoint}: {e}")
+
+    def report_time(report):
+        # METAR: METAR EDDF 081120Z ...
+        # TAF: TAF EDDF 081100Z 0812/0918 ...
+        match = re.search(r"\b(\d{2})(\d{2})(\d{2})Z\b", report)
+
+        if not match:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        day, hour, minute = map(int, match.groups())
+
+        try:
+            candidate = now.replace(
+                day=day,
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0
+            )
+
+            # Корректировка перехода через границу месяца.
+            if candidate > now + timedelta(hours=1):
+                if candidate.month == 1:
+                    candidate = candidate.replace(
+                        year=candidate.year - 1,
+                        month=12
+                    )
+                else:
+                    candidate = candidate.replace(
+                        month=candidate.month - 1
+                    )
+
+            return candidate
+
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    # ---------------- METAR ----------------
+
+    metar_data = request("metar", 6)
+
+    metar_reports = []
+
+    for line in metar_data.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # Оставляем только сообщения нужного аэродрома.
+        if re.search(
+            rf"^(?:METAR|SPECI)\s+{icao}\s+\d{{6}}Z\b",
+            line,
+            re.I
+        ):
+            metar_reports.append(line)
+
+    if not metar_reports:
+        raise RuntimeError(
+            f"Свежий METAR для {icao} не найден за последние 6 часов. "
+            "Возможно, аэропорт не передаёт наблюдения."
+        )
+
+    # Самое новое наблюдение, включая SPECI.
+    metar = max(metar_reports, key=report_time)
+
+    # ---------------- TAF ----------------
+
+    taf = None
 
     try:
-        metar = get_url(
-            metar_url,
-            timeout=25,
-            headers=headers
-        ).decode("utf-8", "replace").strip()
+        taf_data = request("taf", 24)
 
-        if not metar:
-            raise RuntimeError("METAR для аэропорта не найден")
+        taf_reports = []
 
-    except Exception as e:
-        raise RuntimeError(f"Ошибка получения METAR: {e}")
+        for line in taf_data.splitlines():
+            line = line.strip()
 
-    # Получаем TAF
-    taf_url = (
-        f"{base}/taf?"
-        + urllib.parse.urlencode({
-            "ids": icao,
-            "format": "raw",
-            "hours": "24"
-        })
-    )
+            if not line:
+                continue
 
-    try:
-        taf = get_url(
-            taf_url,
-            timeout=25,
-            headers=headers
-        ).decode("utf-8", "replace").strip()
+            if re.search(
+                rf"^TAF\s+(?:(?:AMD|COR)\s+)?{icao}\s+\d{{6}}Z\b",
+                line,
+                re.I
+            ):
+                taf_reports.append(line)
+
+        if taf_reports:
+            taf = max(taf_reports, key=report_time)
 
     except Exception:
         taf = None
 
     return {
         "metar": metar,
-        "taf": taf or None,
+        "taf": taf,
         "url": f"https://metar-taf.com/{icao}"
     }
+
 
 
 # ---------------- METAR / TAF decoder ----------------
